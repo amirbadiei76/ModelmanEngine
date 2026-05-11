@@ -1,0 +1,47 @@
+name: '♻️ Factory Reset'
+
+on:
+  workflow_dispatch:
+    description: 'Reset to factory state: delete images/ folder and restore default README'
+
+jobs:
+  clean:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Delete images folder (if exists)
+        run: |
+          if [ -d "images" ]; then
+            rm -rf images
+            echo "Deleted images/ folder"
+          else
+            echo "images/ folder not found"
+          fi
+
+      - name: Reset README.md to default welcome text
+        run: |
+          cat > README.md << 'EOF'
+          # ModelmanEngine
+
+          🚀 **ModelmanEngine** helps Iranians search the internet freely, even with restrictions and after the 2026 war.
+
+          > 🛠️ **How to use:**  
+          > - 💻 **Windows & Android (desktop mode on):** Go to **Actions** → **All workflows ▽** → **🔍 Search** → **Run workflow ▽** → pick settings → click green **Run workflow**.  
+          > - 📱 **Android (desktop mode off):** Tap **More ▽** → **Actions** → **All workflows ▽** → **🔍 Search** → **Run workflow ▽** → pick settings → tap green **Run workflow**.  
+          > - ♻️ **Factory reset:** Run **♻️ Reset Factory** workflow → deletes everything → back to day one.
+          >
+          > 👤 *Created by **Hossein Alinaghipoor aka Modelman** – [YouTube Channel](http://www.youtube.com/@modelmananimation)*
+          EOF
+          echo "README.md reset to default welcome text"
+
+      - name: Commit and push changes
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add -A
+          git diff --cached --quiet || git commit -m "Factory reset: remove images/ and restore default README [skip ci]"
+          git push
