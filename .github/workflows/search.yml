@@ -31,6 +31,16 @@ on:
         required: false
         default: true
         type: boolean
+      clean_text:
+        description: 'Remove extra line breaks from extracted text (makes it more readable)'
+        required: false
+        default: true
+        type: boolean
+      timeout_seconds:
+        description: 'Page load timeout in seconds (increase if website is slow)'
+        required: false
+        default: 30
+        type: number
       use_vpn:
         description: 'Use VPN (WARP) to bypass restrictions (may not work perfectly against bot detection)'
         required: false
@@ -71,9 +81,9 @@ jobs:
       - name: Fetch, extract text, links, and download images (if requested)
         run: |
           python3 << 'EOF'
-          from playwright.sync_api import sync_playwright
+          from playwright.sync_api import sync_playwright, Error as PlaywrightError
           from urllib.parse import urljoin, urlparse
-          import os, shutil, requests, re
+          import os, shutil, requests, re, time
           from pathlib import Path
 
           target_url = "${{ github.event.inputs.url }}"
@@ -84,6 +94,8 @@ jobs:
           end_idx = int("${{ github.event.inputs.end_index }}")
           raw_formats = "${{ github.event.inputs.image_formats }}"
           image_formats = [fmt.strip().lower() for fmt in raw_formats.split(',')]
+          clean_text_flag = "${{ github.event.inputs.clean_text }}" == "true"
+          timeout_ms = int("${{ github.event.inputs.timeout_seconds }}") * 1000
           output_filename = "README.md"
           images_dir = "images"
 
@@ -94,6 +106,8 @@ jobs:
           if download_images:
               print(f"Image range: {start_idx} to {end_idx}")
               print(f"Image formats: {image_formats}")
+          print(f"Clean text: {clean_text_flag}")
+          print(f"Timeout: {timeout_ms/1000} seconds")
 
           proxy = None
           if use_vpn:
@@ -104,23 +118,68 @@ jobs:
           if download_images:
               os.makedirs(images_dir)
 
-          with sync_playwright() as p:
-              browser = p.chromium.launch(headless=True, proxy=proxy,
-                  args=['--disable-blink-features=AutomationControlled'])
-              page = browser.new_page()
-              print("Loading page...")
-              page.goto(target_url, timeout=30000, wait_until="networkidle")
+          # Expand short URLs using GET + proper headers
+          def expand_short_url(url):
+              try:
+                  session = requests.Session()
+                  session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
+                  resp = session.get(url, allow_redirects=True, timeout=10, stream=True)
+                  resp.close()
+                  return resp.url
+              except Exception as e:
+                  print(f"  Failed to expand {url}: {e}")
+                  return url
 
-              visible_text = page.evaluate("""
+          def clean_text(text):
+              if not clean_text_flag:
+                  return text
+              return re.sub(r'\n\s*\n\s*\n+', '\n\n', text)
+
+          with sync_playwright() as p:
+              browser = None
+              page = None
+              success = False
+              for attempt in range(1, 4):
+                  try:
+                      print(f"Attempt {attempt} to load page...")
+                      if page:
+                          page.close()
+                      if browser:
+                          browser.close()
+                      args = ['--disable-blink-features=AutomationControlled']
+                      if attempt > 1:
+                          args.append('--disable-http2')
+                          print("  -> Adding --disable-http2 to launch args")
+                      browser = p.chromium.launch(headless=True, proxy=proxy, args=args)
+                      page = browser.new_page()
+                      page.goto(target_url, timeout=timeout_ms, wait_until="networkidle")
+                      success = True
+                      print("Page loaded successfully")
+                      break
+                  except PlaywrightError as e:
+                      print(f"  Attempt {attempt} failed: {e}")
+                      if attempt == 3:
+                          print("  All attempts failed. Will extract whatever content has already loaded.")
+                          if page is None:
+                              raise
+                      time.sleep(2)
+
+              if not success and page is None:
+                  raise Exception("Could not load page after 3 attempts")
+
+              # Extract visible text
+              raw_text = page.evaluate("""
                   () => {
                       const body = document.body.cloneNode(true);
                       body.querySelectorAll('script, style, meta, link').forEach(el => el.remove());
                       return body.innerText || '';
                   }
               """)
-              print(f"Visible text length: {len(visible_text)}")
+              visible_text = clean_text(raw_text)
+              print(f"Visible text length (raw: {len(raw_text)}, cleaned: {len(visible_text)})")
 
-              all_links = page.evaluate(f"""
+              # Extract all links
+              all_links_raw = page.evaluate(f"""
                   () => {{
                       const base = '{target_url}';
                       const links = new Set();
@@ -137,6 +196,20 @@ jobs:
                   }}
               """)
 
+              # Expand short URLs and keep mapping
+              SHORT_DOMAINS = ['bit.ly', 'tinyurl.com', 'goo.gl', 'ow.ly', 'is.gd', 'buff.ly', 'short.link']
+              link_display_items = []  # list of tuples (original, expanded)
+              for link in all_links_raw:
+                  parsed = urlparse(link)
+                  if any(domain in parsed.netloc for domain in SHORT_DOMAINS):
+                      print(f"Expanding short URL: {link}")
+                      expanded = expand_short_url(link)
+                      link_display_items.append((link, expanded))
+                  else:
+                      link_display_items.append((link, link))
+              print(f"Total unique links after expansion: {len(link_display_items)}")
+
+              # Image extraction (unchanged)
               def matches_format(url):
                   lower_url = url.lower()
                   for fmt in image_formats:
@@ -145,6 +218,8 @@ jobs:
                   return False
 
               image_urls = set()
+              # Collect expanded URLs for image detection (use the expanded version)
+              all_expanded_urls = {expanded for (_, expanded) in link_display_items}
               img_srcs = page.evaluate("""
                   () => Array.from(document.querySelectorAll('img[src]')).map(img => img.src)
               """)
@@ -152,9 +227,9 @@ jobs:
                   if src and src.startswith(('http://', 'https://')) and matches_format(src):
                       image_urls.add(src)
 
-              for link in all_links:
-                  if matches_format(link):
-                      image_urls.add(link)
+              for url in all_expanded_urls:
+                  if matches_format(url):
+                      image_urls.add(url)
 
               bg_images = page.evaluate("""
                   () => {
@@ -229,7 +304,7 @@ jobs:
           with open(output_filename, 'w', encoding='utf-8') as f:
               f.write(f"# Extracted Content from [{target_url}]({target_url})\n\n")
 
-              # ----- NEW PROFESSIONAL GREY BLOCK WITH EMOJIS -----
+              # Grey block
               f.write("> 🚀 **ModelmanEngine** helps Iranians search the internet freely, even with restrictions and after the 2026 war.\n")
               f.write(">\n")
               f.write("> 🛠️ **How to use:**  \n")
@@ -238,15 +313,13 @@ jobs:
               f.write("> - ♻️ **Factory reset:** Run **♻️ Reset Factory** workflow → deletes everything → back to day one.\n")
               f.write(">\n")
               f.write("> 👤 *Created by **Hossein Alinaghipoor aka Modelman** – [YouTube Channel](http://www.youtube.com/@modelmananimation)*\n\n")
-              # --------------------------------------------------
 
-              # Table of Contents
               f.write("## 📑 Jump to Section\n\n")
               f.write("- [🖼️ Images & GIFs](#️-images--gifs)\n")
               f.write("- [📄 Full Page Text Content](#-full-page-text-content)\n")
               f.write("- [🔗 All Extracted Links](#-all-extracted-links)\n\n")
 
-              # Section 1: Images
+              # Images section
               if download_images and downloaded_images:
                   f.write("## 🖼️ Images & GIFs\n\n")
                   for img_file in downloaded_images:
@@ -254,7 +327,7 @@ jobs:
               elif download_images and not downloaded_images:
                   f.write("## 🖼️ Images & GIFs\n\n*No images found or downloaded.*\n\n")
 
-              # Section 2: Full Text
+              # Full text section
               f.write("## 📄 Full Page Text Content\n\n")
               f.write(f"<details{details_open}>\n<summary>{expand_summary} (full page text)</summary>\n\n")
               f.write("```\n")
@@ -262,11 +335,14 @@ jobs:
               f.write("\n```\n\n")
               f.write("</details>\n\n")
 
-              # Section 3: Links
+              # Links section – display original and expanded if different
               f.write("## 🔗 All Extracted Links\n\n")
               f.write(f"<details{details_open}>\n<summary>{expand_summary} (list of links)</summary>\n\n")
-              for link in sorted(all_links):
-                  f.write(f"- <{link}>\n")
+              for original, expanded in sorted(link_display_items, key=lambda x: x[0]):
+                  if original != expanded:
+                      f.write(f"- {original} → <{expanded}>\n")
+                  else:
+                      f.write(f"- <{expanded}>\n")
               f.write("\n</details>\n")
 
           print(f"Successfully wrote {output_filename}.")
