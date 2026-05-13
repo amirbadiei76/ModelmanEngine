@@ -7,8 +7,18 @@ on:
         description: 'URL to fetch'
         required: true
         default: 'https://example.com'
+      store_history:
+        description: 'Save a copy in History/ folder?'
+        required: false
+        default: true
+        type: boolean
       download_images:
         description: 'Download images from the page?'
+        required: false
+        default: true
+        type: boolean
+      save_pdf:
+        description: 'Save a PDF snapshot of the page?'
         required: false
         default: true
         type: boolean
@@ -78,18 +88,24 @@ jobs:
           playwright install chromium
           playwright install-deps chromium
 
-      - name: Fetch, extract text, links, and download images (if requested)
+      - name: Fetch, extract text, links, download images, and conditionally save PDF
         run: |
           python3 << 'EOF'
           from playwright.sync_api import sync_playwright, Error as PlaywrightError
-          from urllib.parse import urljoin, urlparse
+          from urllib.parse import urlparse
           import os, shutil, requests, re, time
-          from pathlib import Path
+          from datetime import datetime
 
           target_url = "${{ github.event.inputs.url }}"
+          if not target_url.startswith(('http://', 'https://')):
+              target_url = 'https://' + target_url
+              print(f"Added https:// prefix. URL now: {target_url}")
+
+          store_history = "${{ github.event.inputs.store_history }}" == "true"
           use_vpn = "${{ github.event.inputs.use_vpn }}" == "true"
           expand = "${{ github.event.inputs.expand_sections }}" == "true"
           download_images = "${{ github.event.inputs.download_images }}" == "true"
+          save_pdf = "${{ github.event.inputs.save_pdf }}" == "true"
           start_idx = int("${{ github.event.inputs.start_index }}")
           end_idx = int("${{ github.event.inputs.end_index }}")
           raw_formats = "${{ github.event.inputs.image_formats }}"
@@ -98,11 +114,14 @@ jobs:
           timeout_ms = int("${{ github.event.inputs.timeout_seconds }}") * 1000
           output_filename = "README.md"
           images_dir = "images"
+          pdf_dir = "pdf"
 
           print(f"URL: {target_url}")
+          print(f"Store history: {store_history}")
           print(f"VPN enabled: {use_vpn}")
           print(f"Expand sections: {expand}")
           print(f"Download images: {download_images}")
+          print(f"Save PDF: {save_pdf}")
           if download_images:
               print(f"Image range: {start_idx} to {end_idx}")
               print(f"Image formats: {image_formats}")
@@ -113,12 +132,20 @@ jobs:
           if use_vpn:
               proxy = {"server": "socks5://127.0.0.1:1080"}
 
-          if download_images and os.path.exists(images_dir):
+          # ===== UNCONDITIONAL CLEANUP OF images/ AND pdf/ =====
+          # Delete and recreate images folder
+          if os.path.exists(images_dir):
               shutil.rmtree(images_dir)
-          if download_images:
-              os.makedirs(images_dir)
+          os.makedirs(images_dir)
+          print(f"Recreated empty {images_dir}/ folder")
 
-          # Expand short URLs using GET + proper headers
+          # Delete and recreate pdf folder
+          if os.path.exists(pdf_dir):
+              shutil.rmtree(pdf_dir)
+          os.makedirs(pdf_dir)
+          print(f"Recreated empty {pdf_dir}/ folder")
+
+          # Helper: expand short URLs
           def expand_short_url(url):
               try:
                   session = requests.Session()
@@ -135,10 +162,24 @@ jobs:
                   return text
               return re.sub(r'\n\s*\n\s*\n+', '\n\n', text)
 
+          # Function to create safe history folder name from URL and timestamp
+          def get_history_folder_name(url):
+              parsed = urlparse(url)
+              domain = parsed.netloc
+              domain = domain.split(':')[0]
+              if domain.startswith('www.'):
+                  domain = domain[4:]
+              folder_base = domain.replace('.', '_')
+              folder_base = re.sub(r'[^a-zA-Z0-9_-]', '', folder_base)
+              timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+              return f"{folder_base}_{timestamp}"
+
+          page_load_success = False
+          downloaded_images = []
+
           with sync_playwright() as p:
               browser = None
               page = None
-              success = False
               for attempt in range(1, 4):
                   try:
                       print(f"Attempt {attempt} to load page...")
@@ -153,7 +194,7 @@ jobs:
                       browser = p.chromium.launch(headless=True, proxy=proxy, args=args)
                       page = browser.new_page()
                       page.goto(target_url, timeout=timeout_ms, wait_until="networkidle")
-                      success = True
+                      page_load_success = True
                       print("Page loaded successfully")
                       break
                   except PlaywrightError as e:
@@ -164,7 +205,7 @@ jobs:
                               raise
                       time.sleep(2)
 
-              if not success and page is None:
+              if not page_load_success and page is None:
                   raise Exception("Could not load page after 3 attempts")
 
               # Extract visible text
@@ -196,9 +237,8 @@ jobs:
                   }}
               """)
 
-              # Expand short URLs and keep mapping
               SHORT_DOMAINS = ['bit.ly', 'tinyurl.com', 'goo.gl', 'ow.ly', 'is.gd', 'buff.ly', 'short.link']
-              link_display_items = []  # list of tuples (original, expanded)
+              link_display_items = []
               for link in all_links_raw:
                   parsed = urlparse(link)
                   if any(domain in parsed.netloc for domain in SHORT_DOMAINS):
@@ -209,7 +249,7 @@ jobs:
                       link_display_items.append((link, link))
               print(f"Total unique links after expansion: {len(link_display_items)}")
 
-              # Image extraction (unchanged)
+              # Image extraction
               def matches_format(url):
                   lower_url = url.lower()
                   for fmt in image_formats:
@@ -218,7 +258,6 @@ jobs:
                   return False
 
               image_urls = set()
-              # Collect expanded URLs for image detection (use the expanded version)
               all_expanded_urls = {expanded for (_, expanded) in link_display_items}
               img_srcs = page.evaluate("""
                   () => Array.from(document.querySelectorAll('img[src]')).map(img => img.src)
@@ -251,8 +290,6 @@ jobs:
 
               sorted_images = sorted(image_urls, key=lambda s: s.lower())
               print(f"Total unique image URLs found: {len(sorted_images)}")
-
-              downloaded_images = []
 
               if download_images and sorted_images:
                   start = max(0, start_idx - 1)
@@ -296,47 +333,51 @@ jobs:
                       except Exception as e:
                           print(f"  Failed to download {img_url}: {e}")
 
+              # ========== CONDITIONAL PDF SAVING ==========
+              if save_pdf:
+                  try:
+                      timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+                      parsed_domain = urlparse(target_url)
+                      domain_clean = parsed_domain.netloc.split(':')[0].replace('www.', '').replace('.', '_')
+                      pdf_filename = f"{domain_clean}_{timestamp}.pdf"
+                      pdf_path = os.path.join(pdf_dir, pdf_filename)
+                      page.pdf(path=pdf_path, format="A4", print_background=True)
+                      print(f"PDF saved to {pdf_path}")
+                  except Exception as e:
+                      print(f"PDF generation failed: {e}")
+              else:
+                  print("PDF saving disabled by user – skipping")
+
               browser.close()
 
           details_open = " open" if expand else ""
           expand_summary = "Click to collapse" if expand else "Click to expand"
 
+          # ========== WRITE MAIN README ==========
           with open(output_filename, 'w', encoding='utf-8') as f:
-              f.write(f"# Extracted Content from [{target_url}]({target_url})\n\n")
-
-              # Grey block
-              f.write("> 🚀 **ModelmanEngine** helps Iranians search the internet freely, even with restrictions and after the 2026 war.\n")
-              f.write(">\n")
-              f.write("> 🛠️ **How to use:**  \n")
-              f.write("> - 💻 **Windows & Android (desktop mode on):** Go to **Actions** → **All workflows ▽** → **🔍 Search** → **Run workflow ▽** → pick settings → click green **Run workflow**.  \n")
-              f.write("> - 📱 **Android (desktop mode off):** Tap **More ▽** → **Actions** → **All workflows ▽** → **🔍 Search** → **Run workflow ▽** → pick settings → tap green **Run workflow**.  \n")
-              f.write("> - ♻️ **Factory reset:** Run **♻️ Reset Factory** workflow → deletes everything → back to day one.\n")
-              f.write(">\n")
+              f.write("# ModelmanEngine\n")
               f.write("> 👤 *Created by **Hossein Alinaghipoor aka Modelman** – [YouTube Channel](http://www.youtube.com/@modelmananimation)*\n\n")
+              f.write(f"**Searched URL:** `{target_url}`\n\n")
+              f.write("**Jump to:** [🖼️ Images](#-images) · [📄 Text](#-text) · [🔗 Links](#-links)\n\n")
 
-              f.write("## 📑 Jump to Section\n\n")
-              f.write("- [🖼️ Images & GIFs](#️-images--gifs)\n")
-              f.write("- [📄 Full Page Text Content](#-full-page-text-content)\n")
-              f.write("- [🔗 All Extracted Links](#-all-extracted-links)\n\n")
-
-              # Images section
               if download_images and downloaded_images:
-                  f.write("## 🖼️ Images & GIFs\n\n")
+                  f.write("## 🖼️ Images\n\n")
                   for img_file in downloaded_images:
                       f.write(f"![{img_file}]({images_dir}/{img_file})\n\n")
               elif download_images and not downloaded_images:
-                  f.write("## 🖼️ Images & GIFs\n\n*No images found or downloaded.*\n\n")
+                  f.write("## 🖼️ Images\n\n*No images found or downloaded.*\n\n")
+              else:
+                  # If download_images is false, still show the heading (empty)
+                  f.write("## 🖼️ Images\n\n*Image downloading was disabled for this run.*\n\n")
 
-              # Full text section
-              f.write("## 📄 Full Page Text Content\n\n")
+              f.write("## 📄 Text\n\n")
               f.write(f"<details{details_open}>\n<summary>{expand_summary} (full page text)</summary>\n\n")
               f.write("```\n")
               f.write(visible_text.strip())
               f.write("\n```\n\n")
               f.write("</details>\n\n")
 
-              # Links section – display original and expanded if different
-              f.write("## 🔗 All Extracted Links\n\n")
+              f.write("## 🔗 Links\n\n")
               f.write(f"<details{details_open}>\n<summary>{expand_summary} (list of links)</summary>\n\n")
               for original, expanded in sorted(link_display_items, key=lambda x: x[0]):
                   if original != expanded:
@@ -348,6 +389,34 @@ jobs:
           print(f"Successfully wrote {output_filename}.")
           if download_images:
               print(f"Images downloaded to '{images_dir}/' folder and linked in README.")
+
+          # ========== SAVE HISTORY SNAPSHOT (mirror root structure) ==========
+          if store_history and page_load_success:
+              folder_name = get_history_folder_name(target_url)
+              history_path = os.path.join("History", folder_name)
+              os.makedirs(history_path, exist_ok=True)
+              print(f"Saving history snapshot to {history_path}")
+
+              # Copy README.md
+              shutil.copy2(output_filename, os.path.join(history_path, output_filename))
+
+              # Copy images folder (always exists, may be empty)
+              dest_images = os.path.join(history_path, images_dir)
+              if os.path.exists(dest_images):
+                  shutil.rmtree(dest_images)
+              shutil.copytree(images_dir, dest_images)
+              print(f"  Copied images/ to {dest_images}")
+
+              # Copy pdf folder (always exists, may be empty)
+              dest_pdf = os.path.join(history_path, pdf_dir)
+              if os.path.exists(dest_pdf):
+                  shutil.rmtree(dest_pdf)
+              shutil.copytree(pdf_dir, dest_pdf)
+              print(f"  Copied pdf/ to {dest_pdf}")
+
+          elif store_history and not page_load_success:
+              print("Page did not load successfully – skipping history snapshot")
+
           EOF
 
       - name: Commit changes to repo
@@ -355,8 +424,9 @@ jobs:
           git config user.name "github-actions"
           git config user.email "actions@github.com"
           git add README.md
-          if [ "${{ github.event.inputs.download_images }}" == "true" ]; then
-            git add images/
+          git add images/ pdf/ || true
+          if [ -d "History" ]; then
+            git add History/
           fi
           git diff --cached --quiet || git commit -m "Extract content and images for ${{ github.event.inputs.url }} [skip ci]"
           git push
