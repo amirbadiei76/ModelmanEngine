@@ -82,11 +82,11 @@ jobs:
           sleep 15
           curl -s --max-time 5 --socks5-hostname 127.0.0.1:1080 https://cloudflare.com/cdn-cgi/trace | grep warp || echo "WARP may not be active yet, continuing"
 
+      # ONLY CHANGE: removed "playwright install-deps chromium" to skip fonts
       - name: Install dependencies
         run: |
           pip install playwright requests beautifulsoup4
           playwright install chromium
-          playwright install-deps chromium
 
       - name: Fetch, extract text, links, download images, and conditionally save PDF
         run: |
@@ -133,19 +133,16 @@ jobs:
               proxy = {"server": "socks5://127.0.0.1:1080"}
 
           # ===== UNCONDITIONAL CLEANUP OF images/ AND pdf/ =====
-          # Delete and recreate images folder
           if os.path.exists(images_dir):
               shutil.rmtree(images_dir)
           os.makedirs(images_dir)
           print(f"Recreated empty {images_dir}/ folder")
 
-          # Delete and recreate pdf folder
           if os.path.exists(pdf_dir):
               shutil.rmtree(pdf_dir)
           os.makedirs(pdf_dir)
           print(f"Recreated empty {pdf_dir}/ folder")
 
-          # Helper: expand short URLs
           def expand_short_url(url):
               try:
                   session = requests.Session()
@@ -162,7 +159,6 @@ jobs:
                   return text
               return re.sub(r'\n\s*\n\s*\n+', '\n\n', text)
 
-          # Function to create safe history folder name from URL and timestamp
           def get_history_folder_name(url):
               parsed = urlparse(url)
               domain = parsed.netloc
@@ -367,7 +363,6 @@ jobs:
               elif download_images and not downloaded_images:
                   f.write("## 🖼️ Images\n\n*No images found or downloaded.*\n\n")
               else:
-                  # If download_images is false, still show the heading (empty)
                   f.write("## 🖼️ Images\n\n*Image downloading was disabled for this run.*\n\n")
 
               f.write("## 📄 Text\n\n")
@@ -390,35 +385,29 @@ jobs:
           if download_images:
               print(f"Images downloaded to '{images_dir}/' folder and linked in README.")
 
-          # ========== SAVE HISTORY SNAPSHOT (mirror root structure) ==========
+          # ========== SAVE HISTORY SNAPSHOT ==========
           if store_history and page_load_success:
               folder_name = get_history_folder_name(target_url)
               history_path = os.path.join("History", folder_name)
               os.makedirs(history_path, exist_ok=True)
               print(f"Saving history snapshot to {history_path}")
-
-              # Copy README.md
               shutil.copy2(output_filename, os.path.join(history_path, output_filename))
-
-              # Copy images folder (always exists, may be empty)
               dest_images = os.path.join(history_path, images_dir)
               if os.path.exists(dest_images):
                   shutil.rmtree(dest_images)
               shutil.copytree(images_dir, dest_images)
               print(f"  Copied images/ to {dest_images}")
-
-              # Copy pdf folder (always exists, may be empty)
               dest_pdf = os.path.join(history_path, pdf_dir)
               if os.path.exists(dest_pdf):
                   shutil.rmtree(dest_pdf)
               shutil.copytree(pdf_dir, dest_pdf)
               print(f"  Copied pdf/ to {dest_pdf}")
-
           elif store_history and not page_load_success:
               print("Page did not load successfully – skipping history snapshot")
 
           EOF
 
+      # ORIGINAL COMMIT STEP (adds everything)
       - name: Commit changes to repo
         run: |
           git config user.name "github-actions"
