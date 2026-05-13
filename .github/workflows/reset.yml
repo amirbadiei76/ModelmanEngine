@@ -2,7 +2,7 @@ name: '♻️ Factory Reset'
 
 on:
   workflow_dispatch:
-    description: 'Reset to factory state: delete images/ folder and restore default README'
+    description: 'Reset to factory state: delete images/, History/, and pdf/ folders, reset README.md to default header'
 
 jobs:
   clean:
@@ -13,7 +13,7 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Delete images folder (if exists)
+      - name: Delete images, History, and pdf folders
         run: |
           if [ -d "images" ]; then
             rm -rf images
@@ -21,27 +21,49 @@ jobs:
           else
             echo "images/ folder not found"
           fi
+          if [ -d "History" ]; then
+            rm -rf History
+            echo "Deleted History/ folder"
+          else
+            echo "History/ folder not found"
+          fi
+          if [ -d "pdf" ]; then
+            rm -rf pdf
+            echo "Deleted pdf/ folder"
+          else
+            echo "pdf/ folder not found"
+          fi
 
-      - name: Reset README.md to default welcome text
+      - name: Recreate empty images, History, and pdf folders
+        run: |
+          mkdir -p images History pdf
+          echo "Recreated empty images/, History/, and pdf/ folders"
+
+      - name: Reset README.md to default header
         run: |
           cat > README.md << 'EOF'
           # ModelmanEngine
-          🚀 **ModelmanEngine** helps Iranians search the internet freely, even with restrictions and after the 2026 war – extracting full text, images/GIFs, and all links from **most webpages** (excluding those protected by aggressive bot defenses).
-          
-          ℹ️ **To get started:** First, either **fork** this repository (for public use) or click the **plus icon** and choose **Import repository** (for private use).
-          > 🛠️ **How to use:**  
-          > - 💻 **Windows & Android (desktop mode on):** Go to **Actions** → **All workflows ▽** → **🔍 Search** → **Run workflow ▽** → pick settings → click green **Run workflow**.  
-          > - 📱 **Android (desktop mode off):** Tap **More ▽** → **Actions** → **All workflows ▽** → **🔍 Search** → **Run workflow ▽** → pick settings → tap green **Run workflow**.  
-          > - ♻️ **Factory reset:** Run **♻️ Reset Factory** workflow → deletes everything → back to day one.
-          >
-          > 👤 *Created by **Hossein Alinaghipoor aka Modelman** – [YouTube Channel](http://www.youtube.com/@modelmananimation)*
+          🚀 **ModelmanEngine** helps Iranians search the internet freely, even with restrictions and after the 2026 war – extracting full text, images/GIFs, and all links from **most webpages** (excluding those protected by aggressive bot defenses), and saving a PDF snapshot of each page.
+
+          ℹ️ **To get started:** First, either **fork** this repository (for public use) or click the **plus icon** and choose **Import repository** (for private use) to create your own copy. Then, **open that copied repository** in your GitHub account – all workflows below will work from the **Actions** tab.
+
+          🛠️ **How to run a workflow:**  
+          - 💻 **Windows & Android (desktop mode on):** Go to **Actions** → choose your favorite action → **Run workflow ▽** → pick settings → click green **Run workflow**.  
+          - 📱 **Android (desktop mode off):** Tap **More ▽** → **Actions** → **All workflows ▽** → choose your favorite action → **Run workflow ▽** → pick settings → tap green **Run workflow**.
+
+          **Available workflows:**
+          - ♻️ **Factory reset:** Run **♻️ Factory Reset** → removes all downloaded images and history → back to clean start.  
+          - 🧹 **Clear History:** Run **🧹 Clear History** → deletes only the `History/` folder (preserves images and README).  
+          - 🔍 **Search:** Run **🔍 Search** → fetch any URL (example: [https://giphy.com/explore/thor-avengers](https://giphy.com/explore/thor-avengers) — or you can write it without `https://`, like [giphy.com/explore/thor-avengers](https://giphy.com/explore/thor-avengers)). The workflow will prepare images, GIFs, text, links, and a PDF for you. After it finishes, go back to the root of your repository – the `README.md` will show the images and GIFs first, followed by the extracted text and links. The original images and GIFs are saved in the `images/` folder, and the PDF is in the `pdf/` folder.
+
+          👤 *Created by **Hossein Alinaghipoor aka Modelman** – [YouTube Channel](http://www.youtube.com/@modelmananimation)*
           EOF
-          echo "README.md reset to default welcome text"
+          echo "README.md reset to default header"
 
       - name: Commit and push changes
         run: |
           git config user.name "github-actions"
           git config user.email "actions@github.com"
           git add -A
-          git diff --cached --quiet || git commit -m "Factory reset: remove images/ and restore default README [skip ci]"
+          git diff --cached --quiet || git commit -m "Factory reset: remove images/, History/, pdf/ and reset README [skip ci]"
           git push
